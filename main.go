@@ -20,8 +20,6 @@ import (
 
 type arrFlags []string
 
-const outputFileName = "output.proto"
-
 func (i *arrFlags) String() string {
 	return ""
 }
@@ -62,13 +60,15 @@ func main() {
 		log.Fatalf("error fetching packages: %s", err)
 	}
 
-	msgs := getMessages(pkgs, strings.ToLower(*filter))
+	for _, p := range pkgs {
+		info := getMessagesForPackage(p)
 
-	if err = writeOutput(msgs, *targetFolder); err != nil {
-		log.Fatalf("error writing output: %s", err)
+		if outputFileName, err := writePackageOutput(info, *targetFolder); err != nil {
+			log.Fatalf("error writing output: %s", err)
+		} else {
+			log.Printf("output file written to %s%s%s\n", pwd, string(os.PathSeparator), outputFileName)
+		}
 	}
-
-	log.Printf("output file written to %s%s%s\n", pwd, string(os.PathSeparator), outputFileName)
 }
 
 // attempt to load all packages
@@ -100,6 +100,25 @@ func loadPackages(pwd string, pkgs []string) ([]*packages.Package, error) {
 	return packages, nil
 }
 
+type packageInfo struct {
+	p    *packages.Package
+	seen map[string]bool
+
+	Name     string
+	Path     string
+	Messages []*message
+	Imports  []string
+}
+
+func newPackageInfo(p *packages.Package) packageInfo {
+	return packageInfo{
+		p:    p,
+		Name: p.Name,
+		Path: p.PkgPath,
+		seen: map[string]bool{},
+	}
+}
+
 type message struct {
 	Name   string
 	Fields []*field
@@ -113,30 +132,48 @@ type field struct {
 	JSONName   string
 }
 
-func getMessages(pkgs []*packages.Package, filter string) []*message {
-	var out []*message
-	seen := map[string]struct{}{}
-	for _, p := range pkgs {
-		for _, t := range p.TypesInfo.Defs {
-			if t == nil {
+func getPackageFromType(typeName string) (result string) {
+	lastDot := strings.LastIndex(typeName, ".")
+	if lastDot >= 0 {
+		result = typeName[:lastDot]
+	} else {
+		result = typeName
+	}
+
+	return result
+}
+
+func getMessagesForPackage(p *packages.Package) (result packageInfo) {
+	result = newPackageInfo(p)
+
+	for _, t := range p.TypesInfo.Defs {
+		if t == nil {
+			continue
+		}
+		if !t.Exported() {
+			continue
+		}
+
+		if s, ok := t.Type().Underlying().(*types.Struct); ok {
+			if _, ok := result.seen[t.Type().String()]; ok {
 				continue
 			}
-			if !t.Exported() {
+
+			result.seen[t.Type().String()] = true
+
+			typePkgName := getPackageFromType(t.Type().String())
+			if typePkgName != t.Pkg().Path() {
+				result.Imports = append(result.Imports, typePkgName)
 				continue
 			}
-			if _, ok := seen[t.Name()]; ok {
-				continue
-			}
-			if s, ok := t.Type().Underlying().(*types.Struct); ok {
-				seen[t.Name()] = struct{}{}
-				if filter == "" || strings.Contains(strings.ToLower(t.Name()), filter) {
-					out = appendMessage(out, t, s)
-				}
-			}
+
+			result.Messages = appendMessage(result.Messages, t, s)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+
+	sort.Slice(result.Messages, func(i, j int) bool { return result.Messages[i].Name < result.Messages[j].Name })
+
+	return
 }
 
 func appendMessage(out []*message, t types.Object, s *types.Struct) []*message {
@@ -229,11 +266,18 @@ func toProtoFieldName(name string) string {
 	return strcase.ToSnake(name)
 }
 
-func writeOutput(msgs []*message, path string) error {
+func writePackageOutput(info packageInfo, path string) (outputFileName string, err error) {
 	msgTemplate := `syntax = "proto3";
-package proto;
+package {{.Name}};
 
-{{range .}}
+option go_package = "proto/{{.Path}}";
+
+
+{{- range .Imports}}
+import "{{.}}.proto";
+{{- end}}
+
+{{range .Messages}}
 message {{.Name}} {
 {{- range .Fields}}
 {{- if .IsRepeated}}
@@ -250,11 +294,16 @@ message {{.Name}} {
 		panic(err)
 	}
 
+	outputFileName = fmt.Sprintf("%s.proto", info.Name)
+
 	f, err := os.Create(filepath.Join(path, outputFileName))
 	if err != nil {
-		return fmt.Errorf("unable to create file %s : %s", outputFileName, err)
+		err = fmt.Errorf("unable to create file %s : %s", outputFileName, err)
+		return
 	}
 	defer f.Close()
 
-	return tmpl.Execute(f, msgs)
+	err = tmpl.Execute(f, info)
+
+	return
 }
