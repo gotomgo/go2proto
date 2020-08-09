@@ -12,9 +12,9 @@ import (
 	"sort"
 	"strings"
 	"text/template"
-	"unicode"
-	"unicode/utf8"
 
+	"github.com/fatih/structtag"
+	"github.com/iancoleman/strcase"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -110,6 +110,7 @@ type field struct {
 	TypeName   string
 	Order      int
 	IsRepeated bool
+	JSONName   string
 }
 
 func getMessages(pkgs []*packages.Package, filter string) []*message {
@@ -149,11 +150,21 @@ func appendMessage(out []*message, t types.Object, s *types.Struct) []*message {
 		if !f.Exported() {
 			continue
 		}
+
+		var jsonName string
+
+		if tags, err := structtag.Parse(s.Tag(i)); err == nil {
+			if jsonTag, err := tags.Get("json"); err == nil {
+				jsonName = jsonTag.Name
+			}
+		}
+
 		newField := &field{
 			Name:       toProtoFieldName(f.Name()),
 			TypeName:   toProtoFieldTypeName(f),
 			IsRepeated: isRepeated(f),
 			Order:      i + 1,
+			JSONName:   jsonName,
 		}
 		msg.Fields = append(msg.Fields, newField)
 	}
@@ -211,8 +222,11 @@ func toProtoFieldName(name string) string {
 	if len(name) == 2 {
 		return strings.ToLower(name)
 	}
-	r, n := utf8.DecodeRuneInString(name)
-	return string(unicode.ToLower(r)) + name[n:]
+
+	// r, n := utf8.DecodeRuneInString(name)
+	// return string(unicode.ToLower(r)) + name[n:]
+
+	return strcase.ToSnake(name)
 }
 
 func writeOutput(msgs []*message, path string) error {
@@ -225,7 +239,7 @@ message {{.Name}} {
 {{- if .IsRepeated}}
   repeated {{.TypeName}} {{.Name}} = {{.Order}};
 {{- else}}
-  {{.TypeName}} {{.Name}} = {{.Order}};
+  {{.TypeName}} {{.Name}} = {{.Order}} {{- if .JSONName}} [json_name="{{.JSONName}}"] {{- end}};
 {{- end}}
 {{- end}}
 }
