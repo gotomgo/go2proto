@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/fatih/structtag"
 	"github.com/iancoleman/strcase"
 	"golang.org/x/tools/go/packages"
@@ -108,14 +110,16 @@ type packageInfo struct {
 	Path     string
 	Messages []*message
 	Imports  []string
+	Enums    map[string]*enum
 }
 
 func newPackageInfo(p *packages.Package) packageInfo {
 	return packageInfo{
-		p:    p,
-		Name: p.Name,
-		Path: p.PkgPath,
-		seen: map[string]bool{},
+		p:     p,
+		Name:  p.Name,
+		Path:  p.PkgPath,
+		seen:  map[string]bool{},
+		Enums: map[string]*enum{},
 	}
 }
 
@@ -130,6 +134,18 @@ type field struct {
 	Order      int
 	IsRepeated bool
 	JSONName   string
+}
+
+type enum struct {
+	Name           string
+	Values         []*enumValue
+	AllowAlias     bool
+	MissingDefault bool
+}
+
+type enumValue struct {
+	Name  string
+	Value int64
 }
 
 func getPackageFromType(typeName string) (result string) {
@@ -167,16 +183,78 @@ func getMessagesForPackage(p *packages.Package) (result packageInfo) {
 				continue
 			}
 
-			result.Messages = appendMessage(result.Messages, t, s)
+			result.Messages = appendMessage(result.Messages, t, s, p)
+
+			// look for enumeration values
+		} else if c, ok := t.(*types.Const); ok {
+			// should be of type int (or int64?)
+			if t.Type().Underlying().String() == "int" {
+				// the enum type for the const must be defined in the same package
+				if getPackageFromType(t.Type().String()) == result.p.PkgPath {
+					// enum Type Name
+					enumTypeName := splitTypeNameHelper(t.Type())
+
+					// have we already seen it?
+					e, ok := result.Enums[enumTypeName]
+
+					// If not, create the enum type and remember it
+					if !ok {
+						e = &enum{Name: enumTypeName}
+						result.Enums[enumTypeName] = e
+					}
+
+					// convert the enum value to int64
+					val, err := strconv.ParseInt(c.Val().String(), 10, 64)
+					if err == nil {
+						// add the value to the enum type
+						e.Values = append(e.Values, &enumValue{Name: strcase.ToScreamingSnake(c.Name()), Value: val})
+					} else {
+						fmt.Printf("error: unable to convert const value '%s' to type int64: %s\n", c.Val(), err)
+					}
+				}
+			}
 		}
 	}
 
+	// sort messages (structs) by name
 	sort.Slice(result.Messages, func(i, j int) bool { return result.Messages[i].Name < result.Messages[j].Name })
 
+	for _, enum := range result.Enums {
+		// sort enum values by value
+		sort.Slice(enum.Values, func(i, j int) bool {
+			if enum.Values[i].Value == enum.Values[j].Value {
+				return enum.Values[i].Name < enum.Values[j].Name
+			}
+			return enum.Values[i].Value < enum.Values[j].Value
+		})
+
+		hasZero := false
+		hasAlias := false
+		var lastValue int64
+		var pLastValue *int64
+
+		for _, val := range enum.Values {
+			if val.Value == 0 {
+				hasZero = true
+			}
+
+			if (pLastValue != nil) && (val.Value == *pLastValue) {
+				hasAlias = true
+			}
+
+			lastValue = val.Value
+			pLastValue = &lastValue
+		}
+
+		enum.MissingDefault = !hasZero
+		enum.AllowAlias = hasAlias
+	}
+
+	spew.Dump(result.Enums)
 	return
 }
 
-func appendMessage(out []*message, t types.Object, s *types.Struct) []*message {
+func appendMessage(out []*message, t types.Object, s *types.Struct, p *packages.Package) []*message {
 	msg := &message{
 		Name:   t.Name(),
 		Fields: []*field{},
@@ -198,7 +276,7 @@ func appendMessage(out []*message, t types.Object, s *types.Struct) []*message {
 
 		newField := &field{
 			Name:       toProtoFieldName(f.Name()),
-			TypeName:   toProtoFieldTypeName(f),
+			TypeName:   toProtoFieldTypeName(f, p),
 			IsRepeated: isRepeated(f),
 			Order:      i + 1,
 			JSONName:   jsonName,
@@ -209,25 +287,29 @@ func appendMessage(out []*message, t types.Object, s *types.Struct) []*message {
 	return out
 }
 
-func toProtoFieldTypeName(f *types.Var) string {
+func toProtoFieldTypeName(f *types.Var, p *packages.Package) string {
 	switch f.Type().Underlying().(type) {
 	case *types.Basic:
 		name := f.Type().String()
-		return normalizeType(name)
+		return normalizeType(name, p)
 	case *types.Slice:
 		name := splitNameHelper(f)
-		return normalizeType(strings.TrimLeft(name, "[]"))
+		return normalizeType(strings.TrimLeft(name, "[]"), p)
 
 	case *types.Pointer, *types.Struct:
 		name := splitNameHelper(f)
-		return normalizeType(name)
+		return normalizeType(name, p)
+	case *types.Map:
+		if m, ok := f.Type().(*types.Map); ok {
+			return fmt.Sprintf("map<%s,%s>", normalizeType(m.Key().String(), p), normalizeType(m.Elem().String(), p))
+		}
 	}
 	return f.Type().String()
 }
 
-func splitNameHelper(f *types.Var) string {
+func splitTypeNameHelperStr(typeName string) string {
 	// TODO: this is ugly. Find another way of getting field type name.
-	parts := strings.Split(f.Type().String(), ".")
+	parts := strings.Split(typeName, ".")
 
 	name := parts[len(parts)-1]
 
@@ -237,17 +319,40 @@ func splitNameHelper(f *types.Var) string {
 	return name
 }
 
-func normalizeType(name string) string {
+func splitTypeNameHelper(t types.Type) string {
+	// TODO: this is ugly. Find another way of getting field type name.
+	parts := strings.Split(t.String(), ".")
+
+	name := parts[len(parts)-1]
+
+	if name[0] == '*' {
+		name = name[1:]
+	}
+	return name
+}
+
+func splitNameHelper(f *types.Var) string {
+	return splitTypeNameHelper(f.Type())
+}
+
+func normalizeType(name string, p *packages.Package) (result string) {
 	switch name {
 	case "int":
-		return "int64"
+		result = "int64"
 	case "float32":
-		return "float"
+		result = "float"
 	case "float64":
-		return "double"
+		result = "double"
 	default:
-		return name
+		pkgName := getPackageFromType(name)
+		if pkgName == p.PkgPath {
+			result = splitTypeNameHelperStr(name)
+		} else {
+			result = name
+		}
 	}
+
+	return
 }
 
 func isRepeated(f *types.Var) bool {
@@ -272,9 +377,20 @@ package {{.Name}};
 
 option go_package = "proto/{{.Path}}";
 
-
 {{- range .Imports}}
 import "{{.}}.proto";
+{{- end}}
+{{- range .Enums}}
+
+enum {{.Name}} {
+	{{- if .AllowAlias}}
+	option allow_alias = true;{{- end}}
+	{{- if .MissingDefault}}
+	UNKOWN = 0;{{- end}}
+	{{- range .Values}}
+	{{.Name}} = {{.Value}};
+	{{- end}}
+}
 {{- end}}
 
 {{range .Messages}}
