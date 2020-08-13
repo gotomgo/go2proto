@@ -4,8 +4,6 @@ import (
 	"go/types"
 	"sort"
 	"strconv"
-
-	"github.com/iancoleman/strcase"
 )
 
 type Enum struct {
@@ -17,18 +15,36 @@ type Enum struct {
 	Enum           types.Object
 }
 
-func (e *Enum) AddValue(c *types.Const) (err error) {
+func NewEnum(t types.Object) *Enum {
+	return &Enum{Name: getEnumTypeName(t), Enum: t}
+}
+
+func getEnumTypeName(t types.Object) string {
+	return splitTypeNameHelper(t.Type())
+}
+
+// isEnumType determines if the Underlying type is a supported enum type
+func isEnumType(t types.Object) (result bool) {
+	// should be of type int (or int64?)
+	baseType := t.Type().Underlying().String()
+
+	switch baseType {
+	case GoTypeInt, GoTypeInt32, GoTypeInt64:
+		result = true
+	}
+
+	return
+}
+
+func (e *Enum) AddValue(c *types.Const) (result *EnumValue, err error) {
 	var val int64
 
 	// convert the enum value to int64
 	val, err = strconv.ParseInt(c.Val().String(), 0, 64)
 	if err == nil {
+		result = NewEnumValue(c, val)
 		// add the value to the enum type
-		e.Values = append(e.Values, &EnumValue{
-			Name:  strcase.ToScreamingSnake(c.Name()),
-			Value: val,
-			Const: c,
-		})
+		e.Values = append(e.Values, result)
 	}
 
 	return
@@ -68,7 +84,12 @@ func (e *Enum) Canonicalize() {
 }
 
 type EnumValue struct {
+	Const *types.Const
 	Name  string
 	Value int64
-	Const *types.Const
+}
+
+// NewEnumValue creates an instance of EnumValue based on a const
+func NewEnumValue(c *types.Const, value int64) *EnumValue {
+	return &EnumValue{Value: value, Const: c}
 }

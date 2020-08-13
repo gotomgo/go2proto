@@ -5,13 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"go/token"
-	"go/types"
 	"log"
 	"os"
 	"path/filepath"
 	"text/template"
 
-	"github.com/davecgh/go-spew/spew"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -98,24 +96,15 @@ func loadPackages(pwd string, pkgs []string) ([]*packages.Package, error) {
 }
 
 func processPackage(p *packages.Package) (result PackageInfo) {
-	result = NewPackageInfo(p)
+	result = NewPackageInfo(p, NewProtoHelper())
 
 	for _, t := range p.TypesInfo.Defs {
 		if t == nil || !t.Exported() {
 			continue
 		}
 
-		// check for struct
-		if result.IsMessage(t) {
-			result.Messages = append(result.Messages, createMessage(t, t.Type().Underlying().(*types.Struct), p))
-
-			// look for enumeration values
-		} else if e := result.GetEnumForType(t); e != nil {
-			if err := e.AddValue(t.(*types.Const)); err != nil {
-				fmt.Printf("error: unable to add enum value '%s' to enum: %s\n", t.Name(), err)
-			}
-		} else if m := result.AddMap(t); m != nil {
-			spew.Dump(m)
+		if err := result.AddType(t); err != nil {
+			fmt.Printf("error adding type '%s': %s", t.Name(), err)
 		}
 	}
 

@@ -8,21 +8,21 @@ import (
 )
 
 type Message struct {
+	Struct *types.Struct
 	Name   string
 	Fields []*Field
-	Struct *types.Struct
 }
 
-func NewMessage(name string, s *types.Struct) *Message {
+func newMessage(name string, s *types.Struct) *Message {
 	return &Message{
 		Name:   name,
-		Fields: []*Field{},
 		Struct: s,
+		Fields: []*Field{},
 	}
 }
 
-func createMessage(t types.Object, s *types.Struct, p *packages.Package) *Message {
-	msg := NewMessage(t.Name(), s)
+func CreateMessage(t types.Object, s *types.Struct, p *packages.Package) *Message {
+	msg := newMessage(t.Name(), s)
 
 	for i := 0; i < s.NumFields(); i++ {
 		f := s.Field(i)
@@ -39,12 +39,10 @@ func createMessage(t types.Object, s *types.Struct, p *packages.Package) *Messag
 		}
 
 		newField := &Field{
-			Name:       toProtoFieldName(f.Name()),
-			TypeName:   toProtoFieldTypeName(f, p),
+			Field:      f,
 			IsRepeated: isRepeated(f),
 			Order:      i + 1,
 			JSONName:   jsonName,
-			Field:      f,
 		}
 		msg.Fields = append(msg.Fields, newField)
 	}

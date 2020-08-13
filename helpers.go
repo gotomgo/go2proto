@@ -9,6 +9,21 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+func isStruct(t types.Object) bool {
+	_, ok := t.Type().Underlying().(*types.Struct)
+	return ok
+}
+
+func isConst(t types.Object) bool {
+	_, ok := t.(*types.Const)
+	return ok
+}
+
+func isMap(t types.Object) bool {
+	_, ok := t.Type().Underlying().(*types.Map)
+	return ok
+}
+
 func toProtoFieldTypeName(f *types.Var, p *packages.Package) string {
 	switch f.Type().Underlying().(type) {
 	case *types.Basic:
@@ -59,12 +74,12 @@ func splitNameHelper(f types.Object) string {
 
 func normalizeType(name string, p *packages.Package) (result string) {
 	switch name {
-	case "int":
-		result = "int64"
-	case "float32":
-		result = "float"
-	case "float64":
-		result = "double"
+	case GoTypeInt, GoTypeInt64, GoTypeInt32:
+		result = ProtoTypeInt64
+	case GoTypeFloat32:
+		result = ProtoTypeFloat
+	case GoTypeFloat64:
+		result = ProtoTypeDouble
 	default:
 		pkgName := getPackageFromType(name)
 		if pkgName == p.PkgPath {

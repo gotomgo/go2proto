@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"go/types"
 	"sort"
 
@@ -9,8 +10,9 @@ import (
 
 // PackageInfo stores high-level information about the types in a package
 type PackageInfo struct {
-	p    *packages.Package
-	seen map[string]bool
+	p      *packages.Package
+	helper LanguageHelper
+	seen   map[string]bool
 
 	Name     string
 	Path     string
@@ -22,14 +24,15 @@ type PackageInfo struct {
 
 // NewPackageInfo creates an instance of PackageInfo which stores information
 // about the types in the package
-func NewPackageInfo(p *packages.Package) PackageInfo {
+func NewPackageInfo(p *packages.Package, helper LanguageHelper) PackageInfo {
 	return PackageInfo{
-		p:     p,
-		Name:  p.Name,
-		Path:  p.PkgPath,
-		seen:  map[string]bool{},
-		Enums: map[string]*Enum{},
-		Maps:  map[string]*Map{},
+		p:      p,
+		helper: helper,
+		Name:   p.Name,
+		Path:   p.PkgPath,
+		seen:   map[string]bool{},
+		Enums:  map[string]*Enum{},
+		Maps:   map[string]*Map{},
 	}
 }
 
@@ -63,21 +66,8 @@ func (pi *PackageInfo) GetEnum(enumTypeName string, t types.Object) (result *Enu
 
 	// If not, create the enum type and remember it
 	if !ok {
-		result = &Enum{Name: enumTypeName, Enum: t}
+		result = NewEnum(t)
 		pi.Enums[enumTypeName] = result
-	}
-
-	return
-}
-
-// isEnumType determines if the Underlying type is a supported enum type
-func isEnumType(t types.Object) (result bool) {
-	// should be of type int (or int64?)
-	baseType := t.Type().Underlying().String()
-
-	switch baseType {
-	case "int", "int32", "int64":
-		result = true
 	}
 
 	return
@@ -88,13 +78,10 @@ func isEnumType(t types.Object) (result bool) {
 func (pi *PackageInfo) GetEnumForType(t types.Object) (result *Enum) {
 	// enums are always derived from constants
 	if _, ok := t.(*types.Const); ok {
-		// should be of type int (or int64?)
-		// the enum type for the const must be defined in the same package
+		// should be a type used for enums and the enum type for the const must
+		// be defined in the same package
 		if pi.IsPackageType(t) && isEnumType(t) {
-			// enum Type Name
-			enumTypeName := splitTypeNameHelper(t.Type())
-
-			result = pi.GetEnum(enumTypeName, t)
+			result = pi.GetEnum(getEnumTypeName(t), t)
 		}
 	}
 
@@ -114,7 +101,7 @@ func (pi *PackageInfo) canonicalizeMessages() {
 
 // IsMessage determines if the type is a struct that is defined in this package
 // and has not been previously processed
-func (pi *PackageInfo) IsMessage(t types.Object) bool {
+func (pi *PackageInfo) shouldAddMessage(t types.Object) bool {
 	if _, ok := t.Type().Underlying().(*types.Struct); !ok {
 		return false
 	}
@@ -134,14 +121,65 @@ func (pi *PackageInfo) IsMessage(t types.Object) bool {
 	return true
 }
 
-func (pi *PackageInfo) AddMap(t types.Object) (result *Map) {
+func (pi *PackageInfo) AddType(t types.Object) (err error) {
+	// check for struct
+	if isStruct(t) {
+		var m *Message
+		m, err = pi.addMessage(t)
+
+		if (err == nil) && (m != nil) {
+			pi.helper.OnMessage(pi, m)
+
+			for _, f := range m.Fields {
+				pi.helper.OnField(pi, f)
+			}
+		}
+
+		// look for enumeration values
+	} else if isConst(t) {
+		var e *EnumValue
+		e, err = pi.addEnum(t)
+		if (err == nil) && (e != nil) {
+			pi.helper.OnEnumValue(pi, e)
+		}
+	} else if isMap(t) {
+		var m *Map
+		m, err = pi.addMap(t)
+		if (err == nil) && (m != nil) {
+			pi.helper.OnMap(pi, m)
+		}
+	}
+
+	return
+}
+
+func (pi *PackageInfo) addMessage(t types.Object) (result *Message, err error) {
+	if pi.shouldAddMessage(t) {
+		result = CreateMessage(t, t.Type().Underlying().(*types.Struct), pi.p)
+		pi.Messages = append(pi.Messages, result)
+	}
+
+	return
+}
+
+func (pi *PackageInfo) addEnum(t types.Object) (result *EnumValue, err error) {
+	if e := pi.GetEnumForType(t); e != nil {
+		if result, err = e.AddValue(t.(*types.Const)); err != nil {
+			err = fmt.Errorf("unable to add enum value '%s' to enum: %s", t.Name(), err)
+		}
+	}
+
+	return
+}
+
+func (pi *PackageInfo) addMap(t types.Object) (result *Map, err error) {
 	m, ok := t.Type().Underlying().(*types.Map)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("expecting *types.Map, not %t", t)
 	}
 
 	if _, ok = pi.Maps[t.Name()]; ok {
-		return nil
+		return nil, nil
 	}
 
 	result = &Map{
@@ -155,5 +193,5 @@ func (pi *PackageInfo) AddMap(t types.Object) (result *Map) {
 
 	pi.Maps[t.Name()] = result
 
-	return result
+	return
 }
